@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "autotradevillage",
+  "version": "1.0.0",
+  "name": "AutoTradeVillage",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "All-Rights-Reserved",
+  "icon": "assets/autotradevillage/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "client": [
+      "com.johnson.autotradevillage.client.AutotradevillageClient"
+    ],
+    "main": [
+      "com.johnson.autotradevillage.Autotradevillage"
+    ],
+    "modmenu": [
+      "com.johnson.autotradevillage.client.ModMenuImpl"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.15.11",
+    "fabric": "*",
+    "minecraft": "1.21"
+  }
+}
