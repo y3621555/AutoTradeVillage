@@ -14,16 +14,24 @@ import fi.dy.masa.malilib.hotkeys.KeyAction;
 import fi.dy.masa.malilib.interfaces.IClientTickHandler;
 import fi.dy.masa.malilib.util.GuiUtils;
 import fi.dy.masa.malilib.util.InfoUtils;
-import java.util.HashMap;
-import java.util.Vector;
+
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
+
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
+import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.gui.screen.ingame.MerchantScreen;
 import net.minecraft.client.gui.screen.ingame.ShulkerBoxScreen;
+import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.component.ComponentMap;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.MovementType;
 import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.entity.passive.VillagerEntity;
 import net.minecraft.entity.passive.WanderingTraderEntity;
@@ -47,10 +55,12 @@ import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.village.TradeOffer;
 import net.minecraft.village.TradeOfferList;
 
 public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
+
     private static final KeybindCallbacks INSTANCE = new KeybindCallbacks();
 
     private Vector<Entity> villagersInRange = new Vector<Entity>();
@@ -65,6 +75,23 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
     private int voidDelay = 0;
     private int containerDelay = 0;
     private int screenOpened = 0;
+
+    private long lastCommandTime = 0;
+    private static final long COMMAND_COOLDOWN = 5000; // 5秒冷卻時間
+    private long lastWarpTime = 0;
+    private static final long WARP_COOLDOWN = 5000; // 5秒冷卻時間
+    private int replenishAttempts = 0;
+    private static final int MAX_REPLENISH_ATTEMPTS = 3; // 最大重試次數
+
+    private int containerOpenAttempts = 0;
+    private static final int MAX_CONTAINER_OPEN_ATTEMPTS = 5;
+
+    private enum State {
+        閒置, 準備補充物品, 等待傳送完成, 檢查容器, 補充物品中, 等待補充完成, 檢查補充結果,
+        準備返回, 交易中, 準備存放物品, 等待存放傳送完成, 檢查存放容器, 存放物品中, 等待存放完成, 檢查存放結果
+    }
+
+    private State currentState = State.閒置;
 
     public static KeybindCallbacks getInstance() {
         return INSTANCE;
@@ -90,66 +117,71 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
     }
 
     private void processOutput(ScreenHandler handler) {
-        outputOpened = false;
+        String itemToPlace = Configs.Generic.ENABLE_BUY.getBooleanValue()
+                ? Configs.Generic.BUY_ITEM.getStringValue()
+                : "minecraft:emerald";
 
-        String itemToPlace = "minecraft:emerald";
-        if (Configs.Generic.ENABLE_BUY.getBooleanValue()) {
-            itemToPlace = Configs.Generic.BUY_ITEM.getStringValue();
-        }
-
+        int itemsPlaced = 0;
         for (int i = 0; i < handler.slots.size(); i++) {
             if (handler.getSlot(i).inventory instanceof PlayerInventory) {
-                if (Registries.ITEM.getId(handler.getSlot(i).getStack().getItem()).toString().equals(itemToPlace)) {
+                ItemStack stack = handler.getSlot(i).getStack();
+                if (Registries.ITEM.getId(stack.getItem()).toString().equals(itemToPlace)) {
                     try {
-                        MinecraftClient.getInstance().interactionManager.clickSlot(handler.syncId,
-                                handler.getSlot(i).id, 0, SlotActionType.QUICK_MOVE,
-                                MinecraftClient.getInstance().player);
+                        MinecraftClient.getInstance().interactionManager.clickSlot(
+                                handler.syncId, i, 0, SlotActionType.QUICK_MOVE, MinecraftClient.getInstance().player);
+                        itemsPlaced += stack.getCount();
                     } catch (Exception e) {
-                        System.out.println("err " + e.toString());
+                        System.out.println("Error placing items: " + e.toString());
                     }
                 }
             }
         }
 
+        InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO, "已存放 " + itemsPlaced + " 個 " + itemToPlace);
+        currentState = State.等待存放完成;
+        //containerDelay = 10; // 設置一個短暫的延遲，給予足夠的時間來處理物品轉移
     }
 
     private void processInput(ScreenHandler handler) {
         inputOpened = false;
 
-        HashMap<String, Integer> inventory = new HashMap<String, Integer>();
+        String itemToTake = Configs.Generic.ENABLE_SELL.getBooleanValue()
+                ? Configs.Generic.SELL_ITEM.getStringValue()
+                : "minecraft:emerald";
+
+        int desiredAmount = Configs.Generic.MAX_INPUT_ITEMS.getIntegerValue() * 64;
+        int inputCount = 0;
 
         for (int i = 0; i < handler.slots.size(); i++) {
-            if (handler.getSlot(i).inventory instanceof PlayerInventory) {
-                inventory.put(Registries.ITEM.getId(handler.getSlot(i).getStack().getItem()).toString(),
-                        handler.getSlot(i).getStack().getCount() + inventory.getOrDefault(
-                                Registries.ITEM.getId(handler.getSlot(i).getStack().getItem()).toString(), 0));
-            }
-        }
-
-        String itemToTake = "minecraft:emerald";
-        if (Configs.Generic.ENABLE_SELL.getBooleanValue()) {
-            itemToTake = Configs.Generic.SELL_ITEM.getStringValue();
-        }
-
-        int inputCount = inventory.getOrDefault(itemToTake, 0);
-
-        for (int i = 0; i < handler.slots.size(); i++) {
-            if ((handler.getSlot(i).inventory instanceof PlayerInventory) == false) {
-                if (Registries.ITEM.getId(handler.getSlot(i).getStack().getItem()).toString().equals(itemToTake)) {
-                    if (inputCount < (Configs.Generic.MAX_INPUT_ITEMS.getIntegerValue() * 64)) {
-                        inputCount += handler.getSlot(i).getStack().getCount();
+            if (handler.getSlot(i).inventory instanceof PlayerInventory == false) {
+                ItemStack stack = handler.getSlot(i).getStack();
+                if (Registries.ITEM.getId(stack.getItem()).toString().equals(itemToTake)) {
+                    if (inputCount < desiredAmount) {
+                        int amountToMove = Math.min(stack.getCount(), desiredAmount - inputCount);
+                        inputCount += amountToMove;
                         try {
-                            MinecraftClient.getInstance().interactionManager.clickSlot(handler.syncId,
-                                    handler.getSlot(i).id, 0, SlotActionType.QUICK_MOVE,
-                                    MinecraftClient.getInstance().player);
+                            MinecraftClient.getInstance().interactionManager.clickSlot(
+                                    handler.syncId, i, 0,
+                                    amountToMove == stack.getCount() ? SlotActionType.QUICK_MOVE : SlotActionType.PICKUP,
+                                    MinecraftClient.getInstance().player
+                            );
+                            if (amountToMove != stack.getCount()) {
+                                MinecraftClient.getInstance().interactionManager.clickSlot(
+                                        handler.syncId, -999, 0, SlotActionType.PICKUP,
+                                        MinecraftClient.getInstance().player
+                                );
+                            }
                         } catch (Exception e) {
-                            System.out.println("err " + e.toString());
+                            System.out.println("Error moving items: " + e.toString());
                         }
+                        if (inputCount >= desiredAmount) break;
                     }
                 }
             }
         }
 
+        InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO, "已補充 " + inputCount + " 個 " + itemToTake);
+        currentState = State.等待補充完成;
     }
 
     private boolean onKeyActionImpl(KeyAction action, IKeybind key) {
@@ -182,7 +214,6 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                 Configs.Generic.INPUT_CONTAINER_Z.setIntegerValue(blockHit.getBlockPos().getZ());
                 InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO, "輸入容器設置",
                         blockHit.getBlockPos().getX(), blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
-
             }
         } else if (key == Hotkeys.SET_OUTPUT_KEY.getKeybind()) {
             HitResult result = mc.player.raycast(20.0D, 0.0F, false);
@@ -195,12 +226,10 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                         blockHit.getBlockPos().getX(), blockHit.getBlockPos().getY(), blockHit.getBlockPos().getZ());
             }
         } else if (key == Hotkeys.SET_BUY_KEY.getKeybind()) {
-
             String buyItem = Registries.ITEM.getId(mc.player.getInventory().getMainHandStack().getItem()).toString();
             InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO, "購買物品設置為", buyItem);
             Configs.Generic.BUY_ITEM.setValueFromString(buyItem);
         } else if (key == Hotkeys.SET_SELL_KEY.getKeybind()) {
-
             String sellItem = Registries.ITEM.getId(mc.player.getInventory().getMainHandStack().getItem()).toString();
             InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO, "販賣物品設置為", sellItem);
             Configs.Generic.SELL_ITEM.setValueFromString(sellItem);
@@ -211,9 +240,7 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
 
     @Override
     public void onClientTick(MinecraftClient mc) {
-
         if (voidDelay > 0) {
-
             if (Configs.Generic.VOID_TRADING_DELAY_AFTER_TELEPORT.getBooleanValue()) {
                 boolean found = false;
                 for (Entity entity : mc.player.clientWorld.getEntities()) {
@@ -221,19 +248,16 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                         found = true;
                     }
                 }
-
                 if (!found) {
                     voidDelay--;
                 }
             } else {
                 voidDelay--;
             }
-
             return;
         }
 
         if (containerDelay > 0) {
-
             containerDelay--;
         }
 
@@ -241,8 +265,184 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
             return;
         }
 
-        if (Configs.Generic.GLASS_BLOCK.getBooleanValue()) {
+        switch (currentState) {
+            case 閒置:
+                if (needToReplenishSellItem(mc.player)) {
+                    currentState = State.準備補充物品;
+                    replenishAttempts = 0;
+                } else if (needToStoreBuyItem(mc.player)) {
+                    currentState = State.存放物品中;
+                    executeCommand(mc, Configs.Generic.OUTPUT_CONTAINER_WARP.getStringValue());
+                } else {
+                    currentState = State.交易中;
+                }
+                break;
+            case 準備補充物品:
+                if (System.currentTimeMillis() - lastWarpTime > WARP_COOLDOWN) {
+                    executeCommand(mc, Configs.Generic.INPUT_CONTAINER_WARP.getStringValue());
+                    currentState = State.等待傳送完成;
+                    lastWarpTime = System.currentTimeMillis();
+                }
+                break;
+            case 等待傳送完成:
+                if (System.currentTimeMillis() - lastWarpTime > 2000) { // 等待2秒確保傳送完成
+                    currentState = State.檢查容器;
+                }
+                break;
+            case 檢查容器:
+                if (isNearInputContainer(mc)) {
+                    currentState = State.補充物品中;
+                    openInputContainer(mc);
+                } else {
+                    InfoUtils.showGuiOrInGameMessage(Message.MessageType.ERROR, "無法找到輸入容器，重試中...");
+                    currentState = State.準備補充物品;
+                    replenishAttempts++;
+                    if (replenishAttempts >= MAX_REPLENISH_ATTEMPTS) {
+                        InfoUtils.showGuiOrInGameMessage(Message.MessageType.ERROR, "達到最大重試次數，返回交易");
+                        currentState = State.準備返回;
+                    }
+                }
+                break;
+            case 補充物品中:
+                inputOpened = true;
+                if (GuiUtils.getCurrentScreen() instanceof GenericContainerScreen) {
+                    GenericContainerScreen screen = (GenericContainerScreen) GuiUtils.getCurrentScreen();
+                    GenericContainerScreenHandler handler = screen.getScreenHandler();
+                    if ((containerDelay == 0) && inputOpened) {
+                        processInput(handler);
+                        screen.close();
+                    }
+                }
+                else {
+                    InfoUtils.showGuiOrInGameMessage(Message.MessageType.ERROR, "無法打開容器，重試中...");
+                    currentState = State.準備補充物品;
+                    containerOpenAttempts = 0;
+                }
 
+                if (GuiUtils.getCurrentScreen() instanceof ShulkerBoxScreen) {
+                    ShulkerBoxScreen screen = (ShulkerBoxScreen) GuiUtils.getCurrentScreen();
+                    ShulkerBoxScreenHandler handler = screen.getScreenHandler();
+                    if ((containerDelay == 0) && inputOpened) {
+                        processInput(handler);
+                        screen.close();
+                    }
+                }
+                break;
+
+            case 等待補充完成:
+                if (containerDelay > 0) {
+                    containerDelay--;
+                } else {
+                    if (GuiUtils.getCurrentScreen() instanceof GenericContainerScreen) {
+                        GuiUtils.getCurrentScreen().close();
+                    }
+                    currentState = State.檢查補充結果;
+                }
+                break;
+            case 檢查補充結果:
+                if (hasEnoughSellItems(mc.player)) {
+                    currentState = State.準備返回;
+                } else {
+                    InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO, "物品不足，重新嘗試補充");
+                    currentState = State.準備補充物品;
+                    replenishAttempts++;
+                    if (replenishAttempts >= MAX_REPLENISH_ATTEMPTS) {
+                        InfoUtils.showGuiOrInGameMessage(Message.MessageType.ERROR, "達到最大重試次數，返回交易");
+                        currentState = State.準備返回;
+                    }
+                }
+                break;
+            case 準備存放物品:
+                if (System.currentTimeMillis() - lastWarpTime > WARP_COOLDOWN) {
+                    executeCommand(mc, Configs.Generic.OUTPUT_CONTAINER_WARP.getStringValue());
+                    currentState = State.等待存放傳送完成;
+                    lastWarpTime = System.currentTimeMillis();
+                }
+                break;
+            case 等待存放傳送完成:
+                if (System.currentTimeMillis() - lastWarpTime > 2000) { // 等待2秒確保傳送完成
+                    currentState = State.檢查存放容器;
+                }
+                break;
+            case 檢查存放容器:
+                if (isNearOutputContainer(mc)) {
+                    currentState = State.存放物品中;
+                    openOutputContainer(mc);
+                } else {
+                    InfoUtils.showGuiOrInGameMessage(Message.MessageType.ERROR, "無法找到輸出容器，重試中...");
+                    currentState = State.準備存放物品;
+                    replenishAttempts++;
+                    if (replenishAttempts >= MAX_REPLENISH_ATTEMPTS) {
+                        InfoUtils.showGuiOrInGameMessage(Message.MessageType.ERROR, "達到最大重試次數，返回交易");
+                        currentState = State.準備返回;
+                    }
+                }
+                break;
+            case 存放物品中:
+                outputOpened = true;
+                if (GuiUtils.getCurrentScreen() instanceof GenericContainerScreen) {
+                    GenericContainerScreen screen = (GenericContainerScreen) GuiUtils.getCurrentScreen();
+                    GenericContainerScreenHandler handler = screen.getScreenHandler();
+                    if ((containerDelay == 0) && outputOpened) {
+                        processOutput(handler);
+                        screen.close();
+                    }
+                }
+
+                if (GuiUtils.getCurrentScreen() instanceof ShulkerBoxScreen) {
+                    ShulkerBoxScreen screen = (ShulkerBoxScreen) GuiUtils.getCurrentScreen();
+                    ShulkerBoxScreenHandler handler = screen.getScreenHandler();
+                    if ((containerDelay == 0) && outputOpened) {
+                        processOutput(handler);
+                        screen.close();
+                    }
+                }
+                break;
+            case 等待存放完成:
+                if (containerDelay > 0) {
+                    containerDelay--;
+                } else {
+                    if (GuiUtils.getCurrentScreen() instanceof GenericContainerScreen ||
+                            GuiUtils.getCurrentScreen() instanceof ShulkerBoxScreen) {
+                        GuiUtils.getCurrentScreen().close();
+                    }
+                    currentState = State.檢查存放結果;
+                }
+                break;
+            case 檢查存放結果:
+                if (hasStoredEnoughItems(mc.player)) {
+                    currentState = State.準備返回;
+                } else {
+                    InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO, "存放不足，重新嘗試存放");
+                    currentState = State.準備存放物品;
+                    replenishAttempts++;
+                   /*if (replenishAttempts >= MAX_REPLENISH_ATTEMPTS) {
+                        InfoUtils.showGuiOrInGameMessage(Message.MessageType.ERROR, "達到最大重試次數，返回交易");
+                        currentState = State.準備返回;
+                    }*/
+                }
+                break;
+            case 準備返回:
+                if (System.currentTimeMillis() - lastWarpTime > WARP_COOLDOWN) {
+                    executeCommand(mc, "back");
+                    currentState = State.交易中;
+                    lastWarpTime = System.currentTimeMillis();
+                }
+                break;
+            case 交易中:
+                handleNormalTrading(mc);
+                // 在 handleNormalTrading 方法結束後，檢查是否需要補充或存放物品
+                if (needToReplenishSellItem(mc.player)) {
+                    currentState = State.準備補充物品;
+                    replenishAttempts = 0;
+                } else if (needToStoreBuyItem(mc.player)) {
+                    currentState = State.準備存放物品;
+                    executeCommand(mc, Configs.Generic.OUTPUT_CONTAINER_WARP.getStringValue());
+                }
+                break;
+        }
+
+        if (Configs.Generic.GLASS_BLOCK.getBooleanValue()) {
             int playerX = (int) mc.player.getPos().getX();
             int playerZ = (int) mc.player.getPos().getZ();
             int playerY = (int) mc.player.getPos().getY();
@@ -284,7 +484,6 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
         }
 
         if (Configs.Generic.ITEM_FRAME.getBooleanValue()) {
-
             for (ItemFrameEntity entity : mc.player.clientWorld.getEntitiesByClass(ItemFrameEntity.class,
                     new Box(mc.player.getPos().getX() - 3, mc.player.getPos().getY() - 3, mc.player.getPos().getZ() - 3,
                             mc.player.getPos().getX() + 3, mc.player.getPos().getY() + 3,
@@ -316,32 +515,6 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                         }
                     }
                 }
-
-                /*if (stack.hasNbt()) {
-                    NbtCompound tag = stack.getNbt();
-                    NbtCompound elem = tag.getCompound("display");
-                    if (elem != null) {
-                        if (elem.getString("Name").equals("\"sell\"")) {
-                            String sellItem = Registries.ITEM.getId(stack.getItem()).toString();
-                            if (!Configs.Generic.SELL_ITEM.getStringValue().equals(sellItem)) {
-                                InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO,
-                                        "autotrade.message.sell_item_set", sellItem);
-                                Configs.Generic.SELL_ITEM.setValueFromString(sellItem);
-                                break;
-                            }
-                        }
-                        if (elem.getString("Name").equals("\"buy\"")) {
-                            String buyItem = Registries.ITEM.getId(stack.getItem()).toString();
-                            if (!Configs.Generic.BUY_ITEM.getStringValue().equals(buyItem)) {
-                                InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO,
-                                        "autotrade.message.buy_item_set", buyItem);
-                                Configs.Generic.BUY_ITEM.setValueFromString(buyItem);
-                                break;
-                            }
-                        }
-                    }
-                }*/
-
             }
         }
 
@@ -356,7 +529,6 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                 for (int i = 0; i < offers.size(); i++) {
                     TradeOffer offer = offers.get(i);
                     ItemStack sellItem = offer.getSellItem();
-                    //修改過原來是 ItemStack buyItem = offer.getAdjustedFirstBuyItem();
                     ItemStack buyItem = offer.getFirstBuyItem().itemStack();
                     String sellId = Registries.ITEM.getId(sellItem.getItem()).toString();
                     String buyId = Registries.ITEM.getId(buyItem.getItem()).toString();
@@ -369,10 +541,6 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                         mc.getNetworkHandler().sendPacket(new SelectMerchantTradeC2SPacket(i));
                         AutoTrade.sold += offer.getMaxUses();
                         try {
-                            /*
-                             * if (slot.hasStack()) { System.out.println("buy " +
-                             * slot.getStack().getCount()); }
-                             */
                             mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.QUICK_MOVE,
                                     mc.player);
                         } catch (Exception e) {
@@ -387,10 +555,6 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                         AutoTrade.bought += offer.getMaxUses();
                         mc.getNetworkHandler().sendPacket(new SelectMerchantTradeC2SPacket(i));
                         try {
-                            /*
-                             * if (slot.hasStack()) { System.out.println("sell " +
-                             * slot.getStack().getCount()); }
-                             */
                             mc.interactionManager.clickSlot(handler.syncId, slot.id, 0, SlotActionType.QUICK_MOVE,
                                     mc.player);
                         } catch (Exception e) {
@@ -430,8 +594,155 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
             }
         }
 
-        boolean found = false;
 
+        tickCount++;
+        if (tickCount > 200) {
+            tickCount = 0;
+            villagersInRange = new Vector<Entity>();
+            inputInRange = false;
+            outputInRange = false;
+            if (GuiUtils.getCurrentScreen() instanceof MerchantScreen) {
+                GuiUtils.getCurrentScreen().close();
+            }
+            if (GuiUtils.getCurrentScreen() instanceof ShulkerBoxScreen) {
+                GuiUtils.getCurrentScreen().close();
+            }
+            if (GuiUtils.getCurrentScreen() instanceof GenericContainerScreen) {
+                GuiUtils.getCurrentScreen().close();
+            }
+        }
+    }
+
+
+    private boolean isNearOutputContainer(MinecraftClient mc) {
+        BlockPos output = new BlockPos(Configs.Generic.OUTPUT_CONTAINER_X.getIntegerValue(),
+                Configs.Generic.OUTPUT_CONTAINER_Y.getIntegerValue(),
+                Configs.Generic.OUTPUT_CONTAINER_Z.getIntegerValue());
+        return mc.player.getBlockPos().isWithinDistance(output, 5);
+    }
+
+    private void openOutputContainer(MinecraftClient mc) {
+        BlockPos output = new BlockPos(Configs.Generic.OUTPUT_CONTAINER_X.getIntegerValue(),
+                Configs.Generic.OUTPUT_CONTAINER_Y.getIntegerValue(),
+                Configs.Generic.OUTPUT_CONTAINER_Z.getIntegerValue());
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND,
+                new BlockHitResult(output.toCenterPos(), Direction.UP, output, false));
+    }
+
+    private boolean hasStoredEnoughItems(ClientPlayerEntity player) {
+        String itemToCheck = Configs.Generic.ENABLE_BUY.getBooleanValue()
+                ? Configs.Generic.BUY_ITEM.getStringValue()
+                : "minecraft:emerald";
+        int count = countItemInInventory(player, itemToCheck);
+        return count <= (9 * 64); // 假設我們想要存放到剩下9組以下
+    }
+
+
+    private boolean isNearInputContainer(MinecraftClient mc) {
+        BlockPos input = new BlockPos(Configs.Generic.INPUT_CONTAINER_X.getIntegerValue(),
+                Configs.Generic.INPUT_CONTAINER_Y.getIntegerValue(),
+                Configs.Generic.INPUT_CONTAINER_Z.getIntegerValue());
+        return mc.player.getBlockPos().isWithinDistance(input, 5);
+    }
+
+    private void openInputContainer(MinecraftClient mc) {
+        BlockPos input = new BlockPos(Configs.Generic.INPUT_CONTAINER_X.getIntegerValue(),
+                Configs.Generic.INPUT_CONTAINER_Y.getIntegerValue(),
+                Configs.Generic.INPUT_CONTAINER_Z.getIntegerValue());
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND,
+                new BlockHitResult(input.toCenterPos(), Direction.UP, input, false));
+    }
+
+    private boolean hasEnoughSellItems(ClientPlayerEntity player) {
+        String itemToCheck = Configs.Generic.ENABLE_SELL.getBooleanValue()
+                ? Configs.Generic.SELL_ITEM.getStringValue()
+                : "minecraft:emerald";
+        int count = countItemInInventory(player, itemToCheck);
+        return count >= 64; // 或者您想要的其他閾值
+    }
+
+    //檢查補充物品
+
+    private boolean needToReplenishSellItem(ClientPlayerEntity player) {
+        String itemToCheck = Configs.Generic.ENABLE_SELL.getBooleanValue()
+                ? Configs.Generic.SELL_ITEM.getStringValue()
+                : "minecraft:emerald";
+        int count = countItemInInventory(player, itemToCheck);
+        return count < 64;
+    }
+
+    //檢查放入物品
+    private boolean needToStoreBuyItem(ClientPlayerEntity player) {
+        String itemToCheck = Configs.Generic.ENABLE_BUY.getBooleanValue()
+                ? Configs.Generic.BUY_ITEM.getStringValue()
+                : "minecraft:emerald";
+        int count = countItemInInventory(player, itemToCheck);
+        return count > (9 * 64);
+    }
+
+    private int countItemInInventory(ClientPlayerEntity player, String itemId) {
+        int count = 0;
+        for (ItemStack stack : player.getInventory().main) {
+            if (Registries.ITEM.getId(stack.getItem()).toString().equals(itemId)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private void executeCommand(MinecraftClient mc, String command) {
+        long currentTime = System.currentTimeMillis();
+        if (currentTime - lastCommandTime > COMMAND_COOLDOWN) {
+            if (command.startsWith("/")) {
+                command = command.substring(1); // 移除開頭的斜槓，如果有的話
+            }
+            mc.player.networkHandler.sendCommand(command);
+            lastCommandTime = currentTime;
+            InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO, "執行指令: /" + command);
+        } else {
+            InfoUtils.showGuiOrInGameMessage(Message.MessageType.WARNING, "指令冷卻中，請稍後再試");
+        }
+    }
+
+    private void executeWarpCommand(MinecraftClient mc, String command) {
+        executeCommand(mc, command);
+    }
+
+    private void executeBackCommand(MinecraftClient mc) {
+        executeCommand(mc, "back");
+    }
+
+
+    private void handleContainerInteraction(MinecraftClient mc) {
+        BlockPos containerPos = (currentState == State.補充物品中) ?
+                new BlockPos(Configs.Generic.INPUT_CONTAINER_X.getIntegerValue(),
+                        Configs.Generic.INPUT_CONTAINER_Y.getIntegerValue(),
+                        Configs.Generic.INPUT_CONTAINER_Z.getIntegerValue()) :
+                new BlockPos(Configs.Generic.OUTPUT_CONTAINER_X.getIntegerValue(),
+                        Configs.Generic.OUTPUT_CONTAINER_Y.getIntegerValue(),
+                        Configs.Generic.OUTPUT_CONTAINER_Z.getIntegerValue());
+
+        if (mc.player.squaredDistanceTo(containerPos.getX() + 0.5, containerPos.getY() + 0.5, containerPos.getZ() + 0.5) <= 64) {
+            mc.interactionManager.interactBlock(
+                    mc.player,
+                    mc.player.getActiveHand(),
+                    new BlockHitResult(containerPos.toCenterPos(), Direction.UP, containerPos, false)
+            );
+
+            containerDelay = Configs.Generic.CONTAINER_CLOSE_DELAY.getIntegerValue();
+            if (currentState == State.補充物品中) {
+                inputOpened = true;
+            } else {
+                outputOpened = true;
+            }
+        } else {
+            InfoUtils.showGuiOrInGameMessage(Message.MessageType.ERROR, "無法到達容器位置,返回交易");
+            currentState = State.閒置;
+        }
+    }
+
+    private void handleNormalTrading(MinecraftClient mc) {
+        boolean found = false;
         Vector<Entity> newVillagersInRange = new Vector<Entity>(villagersInRange);
 
         for (Entity entity : mc.player.clientWorld.getEntities()) {
@@ -495,23 +806,30 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
             outputOpened = false;
             outputInRange = false;
         }
-
-        tickCount++;
-        if (tickCount > 200) {
-            tickCount = 0;
-            villagersInRange = new Vector<Entity>();
-            inputInRange = false;
-            outputInRange = false;
-            if (GuiUtils.getCurrentScreen() instanceof MerchantScreen) {
-                GuiUtils.getCurrentScreen().close();
-            }
-            if (GuiUtils.getCurrentScreen() instanceof ShulkerBoxScreen) {
-                GuiUtils.getCurrentScreen().close();
-            }
-            if (GuiUtils.getCurrentScreen() instanceof GenericContainerScreen) {
-                GuiUtils.getCurrentScreen().close();
-            }
-        }
-
     }
+
+
+
+    public void renderHud(DrawContext context) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null || !this.functionalityEnabled()) return;
+
+        int x = 10;
+        int y = 10;
+        int color = 0xFFFFFF; // 白色
+
+        String status = "當前狀態: " + currentState.toString();
+        context.drawText(mc.textRenderer, status, x, y, color, true);
+
+        y += 12;
+        String sellItem = Configs.Generic.ENABLE_SELL.getBooleanValue() ? Configs.Generic.SELL_ITEM.getStringValue() : "minecraft:emerald";
+        String sellCount = "賣出物品數量: " + countItemInInventory(mc.player, sellItem);
+        context.drawText(mc.textRenderer, sellCount, x, y, color, true);
+
+        y += 12;
+        String buyItem = Configs.Generic.ENABLE_BUY.getBooleanValue() ? Configs.Generic.BUY_ITEM.getStringValue() : "minecraft:emerald";
+        String buyCount = "購買物品數量: " + countItemInInventory(mc.player, buyItem);
+        context.drawText(mc.textRenderer, buyCount, x, y, color, true);
+    }
+
 }

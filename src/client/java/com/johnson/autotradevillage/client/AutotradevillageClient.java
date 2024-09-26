@@ -1,7 +1,9 @@
 package com.johnson.autotradevillage.client;
 
+import com.johnson.autotradevillage.client.event.KeybindCallbacks;
 import fi.dy.masa.malilib.event.InitializationHandler;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -15,5 +17,12 @@ public class AutotradevillageClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         InitializationHandler.getInstance().registerInitializationHandler(new InitHandler());
+
+        HudRenderCallback.EVENT.register((drawContext, tickDelta) -> {
+            KeybindCallbacks.getInstance().renderHud(drawContext);
+        });
     }
+
+
+
 }

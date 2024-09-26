@@ -60,10 +60,19 @@ public class Configs implements IConfigHandler {
         public static final ConfigInteger CONTAINER_CLOSE_DELAY = new ConfigInteger("延遲（以遊戲刻為單位）", 0, 0,
                 30000000, "延遲（以遊戲刻為單位）; 用於從陷阱箱獲取信號");
 
-        public static final ImmutableList<IConfigValue> OPTIONS = ImmutableList.of(ENABLED, ITEM_FRAME, GLASS_BLOCK,
-                SELECTOR_OFFSET, ENABLE_SELL, SELL_ITEM, SELL_LIMIT, ENABLE_BUY, BUY_ITEM, BUY_LIMIT, MAX_INPUT_ITEMS,
-                INPUT_CONTAINER_X, INPUT_CONTAINER_Y, INPUT_CONTAINER_Z, OUTPUT_CONTAINER_X, OUTPUT_CONTAINER_Y,
-                OUTPUT_CONTAINER_Z, VOID_TRADING_DELAY, VOID_TRADING_DELAY_AFTER_TELEPORT, CONTAINER_CLOSE_DELAY);
+        public static final ConfigString INPUT_CONTAINER_WARP = new ConfigString("輸入容器傳送指令", "warp input_storage",
+                "傳送到輸入容器附近的指令");
+        public static final ConfigString OUTPUT_CONTAINER_WARP = new ConfigString("輸出容器傳送指令", "warp output_storage",
+                "傳送到輸出容器附近的指令");
+
+        public static final ImmutableList<IConfigValue> OPTIONS = ImmutableList.of(
+                ENABLED, ITEM_FRAME, GLASS_BLOCK, SELECTOR_OFFSET, ENABLE_SELL, SELL_ITEM, SELL_LIMIT,
+                ENABLE_BUY, BUY_ITEM, BUY_LIMIT, MAX_INPUT_ITEMS,
+                INPUT_CONTAINER_X, INPUT_CONTAINER_Y, INPUT_CONTAINER_Z,
+                OUTPUT_CONTAINER_X, OUTPUT_CONTAINER_Y, OUTPUT_CONTAINER_Z,
+                VOID_TRADING_DELAY, VOID_TRADING_DELAY_AFTER_TELEPORT, CONTAINER_CLOSE_DELAY,
+                INPUT_CONTAINER_WARP, OUTPUT_CONTAINER_WARP  // 新增的 warp 指令配置
+        );
     }
 
     public static void loadFromFile() {
