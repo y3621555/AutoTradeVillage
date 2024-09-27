@@ -27,4 +27,4 @@
 
 
 原作者:
-https://github.com/sebseb7/autotrade-fabric
+sebseb7
