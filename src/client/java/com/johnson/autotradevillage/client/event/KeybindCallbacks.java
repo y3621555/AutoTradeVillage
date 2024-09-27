@@ -86,9 +86,18 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
     private int containerOpenAttempts = 0;
     private static final int MAX_CONTAINER_OPEN_ATTEMPTS = 5;
 
+    private Queue<Entity> villagerQueue = new LinkedList<>();
+    private Entity currentVillager = null;
+    private int tradeAttempts = 0;
+    private static final int MAX_TRADE_ATTEMPTS = 50; // 最大交易嘗試次數
+
+    //村民類
+    private Set<Entity> tradedVillagers = new HashSet<>();
+
     private enum State {
         閒置, 準備補充物品, 等待傳送完成, 檢查容器, 補充物品中, 等待補充完成, 檢查補充結果,
-        準備返回, 交易中, 準備存放物品, 等待存放傳送完成, 檢查存放容器, 存放物品中, 等待存放完成, 檢查存放結果
+        準備返回, 交易中, 準備存放物品, 等待存放傳送完成, 檢查存放容器, 存放物品中, 等待存放完成, 檢查存放結果,
+        搜索村民, 移動到村民
     }
 
     private State currentState = State.閒置;
@@ -430,14 +439,56 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                 }
                 break;
             case 交易中:
-                handleNormalTrading(mc);
-                // 在 handleNormalTrading 方法結束後，檢查是否需要補充或存放物品
                 if (needToReplenishSellItem(mc.player)) {
                     currentState = State.準備補充物品;
                     replenishAttempts = 0;
+                    break;
                 } else if (needToStoreBuyItem(mc.player)) {
                     currentState = State.準備存放物品;
-                    executeCommand(mc, Configs.Generic.OUTPUT_CONTAINER_WARP.getStringValue());
+                    replenishAttempts = 0;
+                    break;
+                }
+
+                if (currentVillager == null) {
+                    if (villagerQueue.isEmpty()) {
+                        villagerQueue.addAll(findNearbyTradeableVillagers(mc));
+                    }
+                    if (!villagerQueue.isEmpty()) {
+                        currentVillager = villagerQueue.poll();
+                        tradeAttempts = 0;
+                    } else {
+                        currentState = State.搜索村民;
+                        break;
+                    }
+                }
+
+                if (GuiUtils.getCurrentScreen() instanceof MerchantScreen) {
+                    performTrading((MerchantScreen) GuiUtils.getCurrentScreen());
+                } else if (tradeAttempts < MAX_TRADE_ATTEMPTS) {
+                    if (mc.player.squaredDistanceTo(currentVillager) <= 5 * 5) { // 5格距離內
+                        mc.interactionManager.interactEntity(mc.player, currentVillager, Hand.MAIN_HAND);
+                        tradeAttempts++;
+                    } else {
+                        moveTowardsVillager(mc, currentVillager);
+                    }
+                } else {
+                    // 如果嘗試次數過多，跳過當前村民
+                    tradedVillagers.add(currentVillager);
+                    currentVillager = null;
+                    tradeAttempts = 0;
+                }
+                break;
+            case 移動到村民:
+                Entity nearestVillager = findNearestVillager(mc);
+                if (nearestVillager != null) {
+                    if (moveTowardsVillager(mc, nearestVillager)) {
+                        mc.interactionManager.interactEntity(mc.player, nearestVillager, Hand.MAIN_HAND);
+                        voidDelay = Configs.Generic.VOID_TRADING_DELAY.getIntegerValue();
+                        villagerActive = nearestVillager.getId();
+                        state = false;
+                    }
+                } else {
+                    currentState = State.搜索村民;
                 }
                 break;
         }
@@ -746,6 +797,232 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
         Vector<Entity> newVillagersInRange = new Vector<Entity>(villagersInRange);
 
         for (Entity entity : mc.player.clientWorld.getEntities()) {
+            if ((entity instanceof VillagerEntity || entity instanceof WanderingTraderEntity)
+                    && !tradedVillagers.contains(entity)) {
+                if (entity.getPos().distanceTo(mc.player.getPos()) < 2.5f) {
+                    if (!found && !newVillagersInRange.contains(entity)) {
+                        found = true;
+                        newVillagersInRange.add(entity);
+                        mc.interactionManager.interactEntity(mc.player, entity, Hand.MAIN_HAND);
+                        voidDelay = Configs.Generic.VOID_TRADING_DELAY.getIntegerValue();
+                        villagerActive = entity.getId();
+                        state = false;
+                        break;
+                    }
+                }
+            }
+        }
+
+        villagersInRange = newVillagersInRange.stream()
+                .filter(entity -> entity.getPos().distanceTo(mc.player.getPos()) < 4)
+                .collect(Collectors.toCollection(Vector::new));
+
+        if (found) {
+            return;
+        }
+
+        handleContainers(mc);
+
+        if (GuiUtils.getCurrentScreen() instanceof MerchantScreen) {
+            performTrading((MerchantScreen) GuiUtils.getCurrentScreen());
+        }
+    }
+
+    private void handleContainers(MinecraftClient mc) {
+        BlockPos input = new BlockPos(Configs.Generic.INPUT_CONTAINER_X.getIntegerValue(),
+                Configs.Generic.INPUT_CONTAINER_Y.getIntegerValue(),
+                Configs.Generic.INPUT_CONTAINER_Z.getIntegerValue());
+
+        BlockPos output = new BlockPos(Configs.Generic.OUTPUT_CONTAINER_X.getIntegerValue(),
+                Configs.Generic.OUTPUT_CONTAINER_Y.getIntegerValue(),
+                Configs.Generic.OUTPUT_CONTAINER_Z.getIntegerValue());
+
+        if ((input.toCenterPos().distanceTo(mc.player.getPos()) < 4) && !inputInRange) {
+            inputInRange = true;
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND,
+                    new BlockHitResult(input.toCenterPos(), Direction.UP, input, false));
+            containerDelay = Configs.Generic.CONTAINER_CLOSE_DELAY.getIntegerValue();
+            inputOpened = true;
+        } else if ((output.toCenterPos().distanceTo(mc.player.getPos()) < 4) && !outputInRange) {
+            outputInRange = true;
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND,
+                    new BlockHitResult(output.toCenterPos(), Direction.UP, output, false));
+            containerDelay = Configs.Generic.CONTAINER_CLOSE_DELAY.getIntegerValue();
+            outputOpened = true;
+        } else {
+            if (input.toCenterPos().distanceTo(mc.player.getPos()) > 5) {
+                inputOpened = false;
+                inputInRange = false;
+            }
+            if (output.toCenterPos().distanceTo(mc.player.getPos()) > 5) {
+                outputOpened = false;
+                outputInRange = false;
+            }
+        }
+    }
+
+    /*private void performTrading(MerchantScreen screen) {
+        MerchantScreenHandler handler = screen.getScreenHandler();
+        TradeOfferList offers = handler.getRecipes();
+
+        String sellItemStr = Configs.Generic.SELL_ITEM.getStringValue();
+        String buyItemStr = Configs.Generic.BUY_ITEM.getStringValue();
+
+        boolean traded = false;
+        boolean targetTradeLocked = true;  // 假設目標交易最初是鎖定的
+
+        for (int i = 0; i < offers.size(); i++) {
+            TradeOffer offer = offers.get(i);
+            ItemStack sellItem = offer.getSellItem();
+            ItemStack buyItem = offer.getFirstBuyItem().itemStack();
+            String sellId = Registries.ITEM.getId(sellItem.getItem()).toString();
+            String buyId = Registries.ITEM.getId(buyItem.getItem()).toString();
+
+            boolean isTargetTrade = (sellId.equals(buyItemStr) && Configs.Generic.ENABLE_BUY.getBooleanValue()) ||
+                    (buyId.equals(sellItemStr) && Configs.Generic.ENABLE_SELL.getBooleanValue());
+
+            if (isTargetTrade) {
+                targetTradeLocked = offer.isDisabled();
+                if (!targetTradeLocked) {
+                    // 執行交易邏輯
+                    if (buyItem.getCount() <= (sellId.equals(buyItemStr) ? Configs.Generic.BUY_LIMIT.getIntegerValue() : Configs.Generic.SELL_LIMIT.getIntegerValue())) {
+                        Slot slot = handler.getSlot(2);
+                        handler.switchTo(i);
+                        handler.setRecipeIndex(i);
+                        MinecraftClient.getInstance().getNetworkHandler().sendPacket(new SelectMerchantTradeC2SPacket(i));
+                        try {
+                            MinecraftClient.getInstance().interactionManager.clickSlot(
+                                    handler.syncId, slot.id, 0, SlotActionType.QUICK_MOVE,
+                                    MinecraftClient.getInstance().player);
+                            traded = true;
+                            if (sellId.equals(buyItemStr)) {
+                                AutoTrade.bought += offer.getMaxUses();
+                            } else {
+                                AutoTrade.sold += offer.getMaxUses();
+                            }
+                        } catch (Exception e) {
+                            System.out.println("交易錯誤: " + e.toString());
+                        }
+                    }
+                    break;  // 找到並嘗試了目標交易,退出循環
+                }
+            }
+        }
+
+        screen.close();
+
+        if (traded || targetTradeLocked) {
+            tradedVillagers.add(currentVillager);
+            InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO,
+                    targetTradeLocked ? "目標交易已鎖定,跳過此村民" : "與村民完成交易");
+            currentVillager = null;
+            tradeAttempts = 0;
+        } else {
+            // 如果沒有成功交易,可能是因為物品不足,保持當前村民不變
+            tradeAttempts++;
+        }
+
+        if (tradeAttempts >= MAX_TRADE_ATTEMPTS) {
+            // 如果嘗試次數過多,跳過當前村民
+            tradedVillagers.add(currentVillager);
+            currentVillager = null;
+            tradeAttempts = 0;
+        }
+
+        if (tradedVillagers.size() >= 144) {  // 或者其他你認為合適的數字
+            tradedVillagers.clear();
+        }
+    }*/
+
+    private void performTrading(MerchantScreen screen) {
+        MerchantScreenHandler handler = screen.getScreenHandler();
+        TradeOfferList offers = handler.getRecipes();
+
+        String sellItemStr = Configs.Generic.SELL_ITEM.getStringValue();
+        String buyItemStr = Configs.Generic.BUY_ITEM.getStringValue();
+
+        boolean traded = false;
+        boolean targetTradeLocked = true;
+
+        for (int i = 0; i < offers.size(); i++) {
+            TradeOffer offer = offers.get(i);
+            ItemStack sellItem = offer.getSellItem();
+            ItemStack buyItem = offer.getFirstBuyItem().itemStack();
+            String sellId = Registries.ITEM.getId(sellItem.getItem()).toString();
+            String buyId = Registries.ITEM.getId(buyItem.getItem()).toString();
+
+            boolean isTargetTrade = (sellId.equals(buyItemStr) && Configs.Generic.ENABLE_BUY.getBooleanValue()) ||
+                    (buyId.equals(sellItemStr) && Configs.Generic.ENABLE_SELL.getBooleanValue());
+
+            if (isTargetTrade) {
+                targetTradeLocked = offer.isDisabled();
+                if (!targetTradeLocked) {
+                    if (buyItem.getCount() <= (sellId.equals(buyItemStr) ? Configs.Generic.BUY_LIMIT.getIntegerValue() : Configs.Generic.SELL_LIMIT.getIntegerValue())) {
+                        // 檢查是否有足夠的物品進行交易
+                        if (hasEnoughItemsForTrade(buyId, buyItem.getCount())) {
+                            Slot slot = handler.getSlot(2);
+                            handler.switchTo(i);
+                            handler.setRecipeIndex(i);
+                            MinecraftClient.getInstance().getNetworkHandler().sendPacket(new SelectMerchantTradeC2SPacket(i));
+                            try {
+                                MinecraftClient.getInstance().interactionManager.clickSlot(
+                                        handler.syncId, slot.id, 0, SlotActionType.QUICK_MOVE,
+                                        MinecraftClient.getInstance().player);
+                                traded = true;
+                                if (sellId.equals(buyItemStr)) {
+                                    AutoTrade.bought += offer.getMaxUses();
+                                } else {
+                                    AutoTrade.sold += offer.getMaxUses();
+                                }
+                            } catch (Exception e) {
+                                System.out.println("交易錯誤: " + e.toString());
+                            }
+                        } else {
+                            // 如果物品不足，設置狀態以補充物品
+                            currentState = State.準備補充物品;
+                            screen.close();
+                            return;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        screen.close();
+
+        if (traded || targetTradeLocked) {
+            tradedVillagers.add(currentVillager);
+            InfoUtils.showGuiOrInGameMessage(Message.MessageType.INFO,
+                    targetTradeLocked ? "目標交易已鎖定,跳過此村民" : "與村民完成交易");
+            currentVillager = null;
+            tradeAttempts = 0;
+        } else {
+            tradeAttempts++;
+        }
+
+        if (tradeAttempts >= MAX_TRADE_ATTEMPTS) {
+            tradedVillagers.add(currentVillager);
+            currentVillager = null;
+            tradeAttempts = 0;
+        }
+
+        if (tradedVillagers.size() >= 144) {
+            tradedVillagers.clear();
+        }
+    }
+
+
+    private boolean hasEnoughItemsForTrade(String itemId, int requiredAmount) {
+        int count = countItemInInventory(MinecraftClient.getInstance().player, itemId);
+        return count >= requiredAmount;
+    }
+
+    /*private void handleNormalTrading(MinecraftClient mc) {
+        boolean found = false;
+        Vector<Entity> newVillagersInRange = new Vector<Entity>(villagersInRange);
+
+        for (Entity entity : mc.player.clientWorld.getEntities()) {
             if (entity instanceof VillagerEntity || entity instanceof WanderingTraderEntity) {
                 if (entity.getPos().distanceTo(mc.player.getPos()) < 2.5f) {
                     if (found == false) {
@@ -806,7 +1083,7 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
             outputOpened = false;
             outputInRange = false;
         }
-    }
+    }*/
 
 
 
@@ -830,6 +1107,41 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
         String buyItem = Configs.Generic.ENABLE_BUY.getBooleanValue() ? Configs.Generic.BUY_ITEM.getStringValue() : "minecraft:emerald";
         String buyCount = "購買物品數量: " + countItemInInventory(mc.player, buyItem);
         context.drawText(mc.textRenderer, buyCount, x, y, color, true);
+    }
+
+
+    //搜索村民類
+
+    private List<Entity> findNearbyTradeableVillagers(MinecraftClient mc) {
+        Vec3d playerPos = mc.player.getPos();
+        double maxSearchDistanceSquared = 256.0 * 256.0; // 256 方塊的平方距離
+
+        return StreamSupport.stream(mc.player.clientWorld.getEntities().spliterator(), false)
+                .filter(e -> (e instanceof VillagerEntity || e instanceof WanderingTraderEntity))
+                .filter(e -> e.squaredDistanceTo(playerPos) < maxSearchDistanceSquared)
+                .filter(e -> !tradedVillagers.contains(e) && !villagerQueue.contains(e) && e != currentVillager)
+                .sorted(Comparator.comparingDouble(e -> e.squaredDistanceTo(playerPos)))
+                .collect(Collectors.toList());
+    }
+
+    private Entity findNearestVillager(MinecraftClient mc) {
+        return findNearbyTradeableVillagers(mc).stream()
+                .min(Comparator.comparingDouble(e -> e.squaredDistanceTo(mc.player)))
+                .orElse(null);
+    }
+
+    private boolean moveTowardsVillager(MinecraftClient mc, Entity villager) {
+        Vec3d playerPos = mc.player.getPos();
+        Vec3d villagerPos = villager.getPos();
+        double distance = playerPos.distanceTo(villagerPos);
+
+        if (distance > 3) {
+            Vec3d movement = villagerPos.subtract(playerPos).normalize().multiply(0.5);
+            mc.player.setVelocity(movement.x, mc.player.getVelocity().y, movement.z);
+            mc.player.move(MovementType.SELF, mc.player.getVelocity());
+            return false;
+        }
+        return true;
     }
 
 }
