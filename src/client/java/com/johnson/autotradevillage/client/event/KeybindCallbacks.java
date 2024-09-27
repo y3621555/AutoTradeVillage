@@ -451,31 +451,32 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
 
                 if (currentVillager == null) {
                     if (villagerQueue.isEmpty()) {
-                        villagerQueue.addAll(findNearbyTradeableVillagers(mc));
-                    }
-                    if (!villagerQueue.isEmpty()) {
-                        currentVillager = villagerQueue.poll();
-                        tradeAttempts = 0;
+                        List<Entity> nearbyVillagers = findNearbyTradeableVillagers(mc);
+                        if (!nearbyVillagers.isEmpty()) {
+                            currentVillager = nearbyVillagers.get(0);
+                            villagerQueue.addAll(nearbyVillagers.subList(1, Math.min(nearbyVillagers.size(), 5)));
+                        }
                     } else {
-                        currentState = State.搜索村民;
-                        break;
+                        currentVillager = villagerQueue.poll();
                     }
+                    tradeAttempts = 0;
                 }
 
-                if (GuiUtils.getCurrentScreen() instanceof MerchantScreen) {
-                    performTrading((MerchantScreen) GuiUtils.getCurrentScreen());
-                } else if (tradeAttempts < MAX_TRADE_ATTEMPTS) {
-                    if (mc.player.squaredDistanceTo(currentVillager) <= 5 * 5) { // 5格距離內
-                        mc.interactionManager.interactEntity(mc.player, currentVillager, Hand.MAIN_HAND);
-                        tradeAttempts++;
+                if (currentVillager != null) {
+                    if (GuiUtils.getCurrentScreen() instanceof MerchantScreen) {
+                        performTrading((MerchantScreen) GuiUtils.getCurrentScreen());
+                    } else if (tradeAttempts < MAX_TRADE_ATTEMPTS) {
+                        if (moveTowardsVillager(mc, currentVillager)) {
+                            mc.interactionManager.interactEntity(mc.player, currentVillager, Hand.MAIN_HAND);
+                            tradeAttempts++;
+                        }
                     } else {
-                        moveTowardsVillager(mc, currentVillager);
+                        tradedVillagers.add(currentVillager);
+                        currentVillager = null;
+                        tradeAttempts = 0;
                     }
                 } else {
-                    // 如果嘗試次數過多，跳過當前村民
-                    tradedVillagers.add(currentVillager);
-                    currentVillager = null;
-                    tradeAttempts = 0;
+                    currentState = State.搜索村民;
                 }
                 break;
             case 移動到村民:
@@ -1115,13 +1116,28 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
     private List<Entity> findNearbyTradeableVillagers(MinecraftClient mc) {
         Vec3d playerPos = mc.player.getPos();
         double maxSearchDistanceSquared = 256.0 * 256.0; // 256 方塊的平方距離
+        double priorityDistanceSquared = 5.0 * 5.0; // 5 方塊的平方距離
 
-        return StreamSupport.stream(mc.player.clientWorld.getEntities().spliterator(), false)
+        List<Entity> priorityVillagers = new ArrayList<>();
+        List<Entity> otherVillagers = new ArrayList<>();
+
+        StreamSupport.stream(mc.player.clientWorld.getEntities().spliterator(), false)
                 .filter(e -> (e instanceof VillagerEntity || e instanceof WanderingTraderEntity))
                 .filter(e -> e.squaredDistanceTo(playerPos) < maxSearchDistanceSquared)
                 .filter(e -> !tradedVillagers.contains(e) && !villagerQueue.contains(e) && e != currentVillager)
-                .sorted(Comparator.comparingDouble(e -> e.squaredDistanceTo(playerPos)))
-                .collect(Collectors.toList());
+                .forEach(e -> {
+                    if (e.squaredDistanceTo(playerPos) <= priorityDistanceSquared) {
+                        priorityVillagers.add(e);
+                    } else {
+                        otherVillagers.add(e);
+                    }
+                });
+
+        priorityVillagers.sort(Comparator.comparingDouble(e -> e.squaredDistanceTo(playerPos)));
+        otherVillagers.sort(Comparator.comparingDouble(e -> e.squaredDistanceTo(playerPos)));
+
+        priorityVillagers.addAll(otherVillagers);
+        return priorityVillagers;
     }
 
     private Entity findNearestVillager(MinecraftClient mc) {
@@ -1130,18 +1146,43 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                 .orElse(null);
     }
 
-    private boolean moveTowardsVillager(MinecraftClient mc, Entity villager) {
+    private boolean moveTowardsVillager(MinecraftClient mc, Entity targetVillager) {
+        List<Entity> nearbyVillagers = findNearbyTradeableVillagers(mc).stream()
+                .filter(e -> e.squaredDistanceTo(targetVillager) <= 5 * 5)
+                .collect(Collectors.toList());
+
+        Vec3d groupCenter = calculateVillagerGroupCenter(nearbyVillagers);
+        if (groupCenter == null) {
+            groupCenter = targetVillager.getPos();
+        }
+
         Vec3d playerPos = mc.player.getPos();
-        Vec3d villagerPos = villager.getPos();
-        double distance = playerPos.distanceTo(villagerPos);
+        double distance = playerPos.distanceTo(groupCenter);
 
         if (distance > 3) {
-            Vec3d movement = villagerPos.subtract(playerPos).normalize().multiply(0.5);
+            Vec3d movement = groupCenter.subtract(playerPos).normalize().multiply(0.5);
             mc.player.setVelocity(movement.x, mc.player.getVelocity().y, movement.z);
             mc.player.move(MovementType.SELF, mc.player.getVelocity());
             return false;
         }
         return true;
+    }
+
+    //計算村民中間位置
+    private Vec3d calculateVillagerGroupCenter(List<Entity> villagers) {
+        if (villagers.isEmpty()) {
+            return null;
+        }
+
+        double sumX = 0, sumY = 0, sumZ = 0;
+        for (Entity villager : villagers) {
+            sumX += villager.getX();
+            sumY += villager.getY();
+            sumZ += villager.getZ();
+        }
+
+        int count = villagers.size();
+        return new Vec3d(sumX / count, sumY / count, sumZ / count);
     }
 
 }
