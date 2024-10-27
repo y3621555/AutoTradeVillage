@@ -38,6 +38,7 @@ import net.minecraft.entity.passive.WanderingTraderEntity;
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NbtCompound;
+import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
 import net.minecraft.network.packet.c2s.play.SelectMerchantTradeC2SPacket;
 import net.minecraft.predicate.entity.EntityPredicates;
 import net.minecraft.registry.Registries;
@@ -1146,7 +1147,7 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
                 .orElse(null);
     }
 
-    private boolean moveTowardsVillager(MinecraftClient mc, Entity targetVillager) {
+    /*private boolean moveTowardsVillager(MinecraftClient mc, Entity targetVillager) {
         List<Entity> nearbyVillagers = findNearbyTradeableVillagers(mc).stream()
                 .filter(e -> e.squaredDistanceTo(targetVillager) <= 5 * 5)
                 .collect(Collectors.toList());
@@ -1163,6 +1164,90 @@ public class KeybindCallbacks implements IHotkeyCallback, IClientTickHandler {
             Vec3d movement = groupCenter.subtract(playerPos).normalize().multiply(0.5);
             mc.player.setVelocity(movement.x, mc.player.getVelocity().y, movement.z);
             mc.player.move(MovementType.SELF, mc.player.getVelocity());
+            return false;
+        }
+        return true;
+    }*/
+
+    private long lastMoveTime = 0;
+    private static final long MOVE_COOLDOWN = 50; // 50ms cooldown between moves
+    //新版移動 高速
+    /*private boolean moveTowardsVillager(MinecraftClient mc, Entity targetVillager) {
+        Vec3d targetPos = targetVillager.getPos();
+        Vec3d playerPos = mc.player.getPos();
+        double distance = playerPos.distanceTo(targetPos);
+
+        if (distance > 3) {
+            long currentTime = System.currentTimeMillis();
+            if (currentTime - lastMoveTime < MOVE_COOLDOWN) {
+                return false;
+            }
+
+            // 計算移動距離和方向
+            double moveDistance = Math.min(10, distance - 3); // 減小單次移動距離以提高穩定性
+            Vec3d movement = targetPos.subtract(playerPos).normalize().multiply(moveDistance);
+
+            // 計算新位置
+            double newX = playerPos.getX() + movement.x;
+            double newY = playerPos.getY(); // 保持相同的Y坐標
+            double newZ = playerPos.getZ() + movement.z;
+
+            // 發送移動數據包並更新位置
+            mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.PositionAndOnGround(
+                    newX, newY, newZ, true
+            ));
+
+            // 立即更新玩家位置
+            mc.player.setPosition(newX, newY, newZ);
+
+            lastMoveTime = currentTime;
+            return false;
+        }
+        return true;
+    }*/
+
+    private boolean moveTowardsVillager(MinecraftClient mc, Entity targetVillager) {
+        Vec3d targetPos = targetVillager.getPos();
+        Vec3d playerPos = mc.player.getPos();
+
+        // 只計算水平距離（X和Z）
+        double horizontalDistance = Math.sqrt(
+                Math.pow(targetPos.x - playerPos.x, 2) +
+                        Math.pow(targetPos.z - playerPos.z, 2)
+        );
+
+        if (horizontalDistance > 2) { // 改用2格作為觸發距離，更容易接觸到村民
+            long currentTime = System.currentTimeMillis();
+            if (currentTime - lastMoveTime < MOVE_COOLDOWN) {
+                return false;
+            }
+
+            // 計算X和Z方向的移動
+            double moveDistance = Math.min(10, horizontalDistance - 1.5);
+            double dx = targetPos.x - playerPos.x;
+            double dz = targetPos.z - playerPos.z;
+
+            // 標準化移動向量
+            double length = Math.sqrt(dx * dx + dz * dz);
+            dx = (dx / length) * moveDistance;
+            dz = (dz / length) * moveDistance;
+
+            // 計算新位置
+            double newX = playerPos.x + dx;
+            double newZ = playerPos.z + dz;
+
+            // 發送移動數據包並更新位置
+            mc.player.networkHandler.sendPacket(new PlayerMoveC2SPacket.PositionAndOnGround(
+                    newX,
+                    playerPos.y, // 保持原有Y坐標
+                    newZ,
+                    true
+            ));
+
+            // 立即更新玩家位置
+            mc.player.setPosition(newX, playerPos.y, newZ);
+
+            lastMoveTime = currentTime;
             return false;
         }
         return true;
